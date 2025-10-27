@@ -16,7 +16,7 @@ import time
 
 # ======================= KONFIGURACE SIMULACE ======================
 
-CONFIGURATION = 'chaos_3body' # Změněno, aby se rovnou spustil chaos
+CONFIGURATION = 'ellipse_pair' # 'circle_pair', 'ellipse_pair', 'chaos_3body'
 
 # --- Parametry pro 2 Tělesa ---
 BODY_PARAMS_2BODY = {
@@ -36,7 +36,14 @@ BODY_PARAMS_2BODY = {
 CHAOS_CONFIG = {
     'n_bodies': 3,
     'n_variations': 3, # Počet simulací s mírně odlišnými podmínkami
-    'initial_state': { #Počáteční stav těles
+#    'initial_state': { #Počáteční stav těles stabilní osmička 
+#    'bodies': [
+#        [1.0, [ 0.97000436, -0.24308753, 0], [0.46620368, 0.43236573, 0]],
+#        [1.0, [-0.97000436,  0.24308753, 0], [0.46620368, 0.43236573, 0]],
+#        [1.0, [          0,           0, 0], [-0.93240736, -0.86473146, 0]]
+#    ]
+#},
+    'initial_state': { #Počáteční stav těles stabilní osmička 
     'bodies': [
         [1.0, [2.0, 1.5, 0], [-0.25, 0.3, 0.1]],
         
@@ -60,10 +67,10 @@ CHAOS_CONFIG = {
 
 # --- Simulační Parametry ---
 SIM_PARAMS = {
-    'dt': 0.01,                 # Zmenšeno pro stabilitu chaosu
-    'total_time': 100,          # Zvětšeno pro zobrazení divergence
+    'dt': 0.01,                 # Časový krok (menší pro chaos!) pro chaos dát 0.01 nebo méně
+    'total_time': 150,          # Celkový čas simulace Pro chaos dát 150 nebo více
     'G': 1.0,                   # Gravitační konstanta
-    'softening': 0.01,          # Změkčení (menší pro chaos!)
+    'softening': 0.05,          # Změkčení (menší pro chaos!)
 }
 
 # --- Parametry Vizualizace  ---
@@ -102,56 +109,49 @@ def get_body_size(masses, scale_factor):
     return np.clip(scaled_size, min_size, max_size)
 
 def calculate_energy(positions, velocities, masses, G):
-    """Vypočítá kinetickou, potenciální a celkovou energii. Používá softening pro konzistenci."""
-    softening = SIM_PARAMS['softening'] # Použijeme softening i pro energii
+    """Vypočítá kinetickou, potenciální a celkovou energii."""
     ke = 0.5 * np.sum(masses * np.sum(velocities**2, axis=1))
     pe = 0.0; n = len(masses)
     for i in range(n):
         for j in range(i + 1, n):
             diff = positions[i] - positions[j]
-            r_sqr = np.sum(diff**2)
-            # Důležité: Použití softeningu pro konzistenci
-            r_ij = np.sqrt(r_sqr + softening**2) 
-            pe -= G * masses[i] * masses[j] / r_ij
+            r_ij = np.sqrt(np.sum(diff**2))
+            pe -= G * masses[i] * masses[j] / (r_ij + 1e-10)
     return ke, pe, ke + pe
 
 def calculate_system_divergence(positions_set):
-    """Vypočítá průměrnou euklidovskou vzdálenost mezi variacemi."""
+    """Vypočítá průměrnou vzdálenost mezi variacemi."""
     variation_count = len(positions_set)
     if variation_count <= 1 or positions_set[0] is None: return None
 
-    # Zjistíme nejkratší historii
-    n_timesteps = min(p.shape[0] for p in positions_set if p is not None) 
+    n_timesteps = min(p.shape[0] for p in positions_set if p is not None) # Nejkratší historie
     if n_timesteps == 0: return None
 
-    # Ořízneme na stejnou délku a převedeme na CPU
+    # Ořízneme na stejnou délku a převedeme na CPU, pokud je třeba
     pos_set_np = []
     for pos in positions_set:
-        if pos is None: return None 
+        if pos is None: return None # Pokud některá variace selhala
         pos_np = cp.asnumpy(pos[:n_timesteps]) if GPU_AVAILABLE and isinstance(pos, cp.ndarray) else pos[:n_timesteps]
         pos_set_np.append(pos_np)
 
     divergence = np.zeros(n_timesteps)
     for t in range(n_timesteps):
-        total_dist = 0; pair_count = 0
+        total_dist_sq = 0; pair_count = 0
         for i in range(variation_count):
             for j in range(i + 1, variation_count):
                 diff = pos_set_np[i][t] - pos_set_np[j][t]
-                # Euklidovská vzdálenost
-                dist = np.sqrt(np.sum(diff**2))
-                total_dist += dist
+                total_dist_sq += np.sum(diff**2)
                 pair_count += 1
         if pair_count > 0:
-             # Průměrná vzdálenost
-             divergence[t] = total_dist / pair_count
+             divergence[t] = np.sqrt(total_dist_sq / pair_count)
 
     return divergence
 
+
 # =================== FYZIKÁLNÍ VÝPOČTY (GPU/CPU) =====================
-# Funkce calculate_accelerations a runge_kutta_step (beze změny, použijí globální cp/np)
+# Funkce calculate_accelerations a runge_kutta_step 
 def calculate_accelerations(positions_gpu, masses_gpu, G, softening):
     """Vypočítá zrychlení (optimalizováno pro GPU)."""
-    # ... (kód funkce calculate_accelerations zůstává stejný) ...
     n = positions_gpu.shape[0]
     diff = positions_gpu[:, cp.newaxis, :] - positions_gpu[cp.newaxis, :, :]
     dist_sqr = cp.sum(diff**2, axis=-1) + softening**2
@@ -167,7 +167,6 @@ def calculate_accelerations(positions_gpu, masses_gpu, G, softening):
 
 def runge_kutta_step(positions_gpu, velocities_gpu, masses_gpu, dt, G, softening):
     """Jeden krok RK4."""
-    # ... (kód funkce runge_kutta_step zůstává stejný) ...
     a1 = calculate_accelerations(positions_gpu, masses_gpu, G, softening)
     k1_v = a1 * dt; k1_r = velocities_gpu * dt
     a2 = calculate_accelerations(positions_gpu + k1_r * 0.5, masses_gpu, G, softening)
@@ -191,7 +190,6 @@ def runge_kutta_step(positions_gpu, velocities_gpu, masses_gpu, dt, G, softening
 # ====================== INICIALIZACE TĚLES =========================
 def initialize_bodies(variation_idx=0):
     """Inicializuje tělesa podle CONFIGURATION."""
-    # ... (kód funkce initialize_bodies zůstává stejný) ...
     if CONFIGURATION == 'chaos_3body':
         n_bodies = CHAOS_CONFIG['n_bodies']
         base_state = CHAOS_CONFIG['initial_state']['bodies']
@@ -260,9 +258,9 @@ def initialize_bodies(variation_idx=0):
 
 
 # ======================= HLAVNÍ SIMULACE =============================
+# Funkce run_simulation 
 def run_simulation(variation_idx=0):
     """Spustí N-body simulaci a vrátí historii."""
-    # ... (kód funkce run_simulation zůstává stejný) ...
     print(f"--- Spouštím simulaci {'(variace '+str(variation_idx)+')' if CONFIGURATION=='chaos_3body' else ''} ---")
     positions_np, velocities_np, masses_np = initialize_bodies(variation_idx)
     n_bodies = positions_np.shape[0]
@@ -293,7 +291,6 @@ def run_simulation(variation_idx=0):
                  print(f"CHYBA: Nestabilita v kroku {step}! Přerušuji."); return None # Ukončíme při chybě
              if history_idx < n_frames_saved:
                  positions_history[history_idx] = current_pos_np
-                 # KINETICKÁ A POTENCIÁLNÍ ENERGIE MUSÍ BÝT VYPOČÍTÁNA ZDE (na CPU datech)
                  ke, pe, total_e = calculate_energy(current_pos_np, current_vel_np, masses_np, G)
                  ke_history[history_idx] = ke; pe_history[history_idx] = pe; total_energy_history[history_idx] = total_e
                  time_points[history_idx] = step * dt
@@ -324,7 +321,7 @@ def run_simulation(variation_idx=0):
 
 
 # ========================= VIZUALIZACE ===============================
-# ... (pomocná funkce _update_artists a visualize_2body_simulation beze změny) ...
+# Pomocná funkce _update_artists zůstává stejná
 def _update_artists(trail, marker, positions_history, frame, body_idx, trail_length):
     start_idx = max(0, frame - trail_length + 1)
     current_pos = positions_history[frame, body_idx]
@@ -341,6 +338,7 @@ def _update_artists(trail, marker, positions_history, frame, body_idx, trail_len
         trail.set_data([], []); trail.set_3d_properties([])
     return True
 
+# Vizualizace pro 2 tělesa (zjednodušená)
 def visualize_2body_simulation(positions_history, ke, pe, total_e, time_points, masses):
     """Vizualizuje simulaci 2 těles."""
     global last_azim, last_elev
@@ -385,10 +383,13 @@ def visualize_2body_simulation(positions_history, ke, pe, total_e, time_points, 
     plt.tight_layout(pad=1.5); plt.show()
 
 
-# Nová a upravená vizualizace chaosu
+# Vizualizace pro více variací (chaos)
+# Vizualizace pro více variací (chaos) - ZOBRAZÍ POUZE 3D ANIMACI
+# Vizualizace pro více variací (chaos) - ZOBRAZÍ POUZE 3D ANIMACI
 def visualize_multiple_variations(all_positions, all_energies, time_points, masses, divergence):
     """
-    Vizualizuje 3D trajektorie, logaritmus divergence a zachování energie.
+    Vizualizuje POUZE 3D trajektorie více variací pro demonstraci chaosu.
+    Všechna tělesa v jedné variaci mají stejnou barvu.
     """
     global last_azim, last_elev
     if not all_positions or any(p is None for p in all_positions): print("Prázdná data."); return
@@ -398,72 +399,42 @@ def visualize_multiple_variations(all_positions, all_energies, time_points, mass
     n_frames = min(p.shape[0] for p in all_positions if p is not None)
     if n_frames == 0: print("Žádné snímky k zobrazení."); return
 
+    # --- Změna: Získání základních barev a jejich přímé použití ---
     base_colors_hex = CHAOS_CONFIG['color_schemes']
     sizes = get_body_size(masses, VIZ_MARKER_SCALE_FACTOR)
-    tp = time_points[:n_frames] # Společný čas
 
-    # 1. Nastavení Layoutu (3 grafy vedle sebe)
-    fig = plt.figure(figsize=(18, 8))
-    gs = fig.add_gridspec(1, 3)
-    ax1 = fig.add_subplot(gs[0, 0], projection='3d') # 3D Animace
-    ax2 = fig.add_subplot(gs[0, 1]) # Divergence
-    ax3 = fig.add_subplot(gs[0, 2]) # Energie
-
-    # --- 3D Nastavení ---
     max_r = VIZ_DEFAULT_BOX_SIZE
     valid_coords = []
     for pos_hist in all_positions:
         valid_pos = pos_hist[:n_frames][np.all(np.isfinite(pos_hist[:n_frames]), axis=(1,2))]
         if valid_pos.shape[0] > 0: valid_coords.append(np.max(np.abs(valid_pos)))
     if valid_coords: max_r = max(max(valid_coords) * 1.1, max_r)
+
+    fig = plt.figure(figsize=(10, 8))
+    ax1 = fig.add_subplot(111, projection='3d')
+
     ax1.set_xlim(-max_r, max_r); ax1.set_ylim(-max_r, max_r); ax1.set_zlim(-max_r, max_r)
     ax1.set_xlabel('X'); ax1.set_ylabel('Y'); ax1.set_zlabel('Z')
-    ax1.set_title('Trajektorie (Chaos)')
-    
-    all_trails = []; all_markers = []
+    ax1.set_title('Demonstrace Chaosu (3 Tělesa - 3 Variace)')
+
+    all_trails = []
+    all_markers = []
     for v_idx in range(var_count):
+        # Získáme základní barvu pro tuto variaci
         current_color = base_colors_hex[v_idx % len(base_colors_hex)]
+        # Vytvoříme traily a markery s touto jednou barvou pro všechna tělesa variace
         var_trails = [ax1.plot([],[],[], '-', color=current_color, alpha=0.6, linewidth=LINEWIDTH)[0] for b in range(n_bodies)]
         var_markers = [ax1.scatter([],[],[], s=sizes[b], color=current_color, alpha=0.9, ec='k', lw=0.5) for b in range(n_bodies)]
-        all_trails.append(var_trails); all_markers.append(var_markers)
+        all_trails.append(var_trails)
+        all_markers.append(var_markers)
+    # --- Konec změny ---
 
     time_txt = ax1.text2D(0.02, 0.98, '', transform=ax1.transAxes, ha='left', va='top',
                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
-    # --- Graf Divergence (ax2) ---
-    if divergence is not None and len(divergence) > 0:
-        # Použijeme log10 pro exponenciální růst
-        # Nahradíme nulovou divergenci malou hodnotou pro logaritmickou škálu (pro t=0)
-        log_divergence = np.log10(np.maximum(divergence[:n_frames], 1e-15))
-        ax2.plot(tp, log_divergence, 'k-')
-        ax2.set_title('Exponenciální Divergence Trajektorií')
-        ax2.set_xlabel('Čas (T)')
-        ax2.set_ylabel('Log10(Prům. Vzdálenost)')
-        ax2.grid(True)
-        # Zvýraznění lineárního růstu (fáze chaosu)
-        ax2.axhline(y=np.log10(max_r*0.5), color='r', linestyle='--', label='Saturace (velikost systému)')
-        ax2.legend()
-    else:
-        ax2.set_title('Divergence: Chyba dat')
-        ax2.grid(True)
+    tp = time_points[:n_frames] # Společný čas
 
-    # --- Graf Zachování Energie (ax3) ---
-    # Zobrazíme změnu E pro první variaci
-    ke0, pe0, total_e_var0 = all_energies[0]
-    e0 = total_e_var0[0]
-    # Relativní změna energie
-    e_change = (total_e_var0[:n_frames] - e0) / (np.abs(e0) + 1e-10)
-
-    ax3.plot(tp, e_change, color='purple', linewidth=LINEWIDTH)
-    ax3.set_title('Relativní Změna Celkové Energie (Var. 0)')
-    ax3.set_xlabel('Čas (T)')
-    ax3.set_ylabel(r'$\Delta E / |E_0|$')
-    ax3.grid(True)
-    # Nastavíme symetrické limity
-    max_ch = np.max(np.abs(e_change))
-    ax3.set_ylim(-max_ch*1.1, max_ch*1.1)
-
-    # Funkce update (jen pro 3D graf)
+    # Funkce update zůstává stejná (používá již vytvořené objekty s pevnými barvami)
     def update(frame):
         global last_azim, last_elev
         artists = []
@@ -494,15 +465,13 @@ def run_multiple_variations():
         result = run_simulation(variation_idx=i)
         if result is None: success = False; break
         pos, ke, pe, tot, tp, m = result
-        # all_energies je uložen jako (ke_history, pe_history, total_energy_history)
-        all_pos[i] = pos; all_ene[i] = (ke, pe, tot) 
+        all_pos[i] = pos; all_ene[i] = (ke, pe, tot)
         if i == 0: masses, time_points = m, tp
 
     if not success: print("Některá variace selhala."); return None
 
     print("Výpočet divergence...")
-    # Funkce calculate_system_divergence je upravena pro průměrnou vzdálenost (ne sqr)
-    divergence = calculate_system_divergence(all_pos) 
+    divergence = calculate_system_divergence(all_pos)
     if divergence is None: print("Nepodařilo se spočítat divergenci."); return None
 
     return all_pos, all_ene, time_points, masses, divergence

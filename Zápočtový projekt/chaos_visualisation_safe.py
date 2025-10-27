@@ -1,4 +1,8 @@
 import numpy as np
+import os
+import sys 
+
+# Pokus o import CuPy pro GPU akceleraci
 try:
     import cupy as cp
     GPU_AVAILABLE = True
@@ -16,7 +20,8 @@ import time
 
 # ======================= KONFIGURACE SIMULACE ======================
 
-CONFIGURATION = 'chaos_3body' # Změněno, aby se rovnou spustil chaos
+CONFIGURATION = 'chaos_3body' # 'circle_pair', 'ellipse_pair', 'chaos_3body'
+DATA_FILENAME = 'chaos_simulation_data.npz' # Soubor pro uložení dat simulace
 
 # --- Parametry pro 2 Tělesa ---
 BODY_PARAMS_2BODY = {
@@ -36,7 +41,7 @@ BODY_PARAMS_2BODY = {
 CHAOS_CONFIG = {
     'n_bodies': 3,
     'n_variations': 3, # Počet simulací s mírně odlišnými podmínkami
-    'initial_state': { #Počáteční stav těles
+    'initial_state': { # Počáteční stav těles
     'bodies': [
         [1.0, [2.0, 1.5, 0], [-0.25, 0.3, 0.1]],
         
@@ -60,8 +65,8 @@ CHAOS_CONFIG = {
 
 # --- Simulační Parametry ---
 SIM_PARAMS = {
-    'dt': 0.01,                 # Zmenšeno pro stabilitu chaosu
-    'total_time': 100,          # Zvětšeno pro zobrazení divergence
+    'dt': 0.005,                 # Zmenšeno pro stabilitu chaosu
+    'total_time': 200,          # Zvětšeno pro zobrazení divergence
     'G': 1.0,                   # Gravitační konstanta
     'softening': 0.01,          # Změkčení (menší pro chaos!)
 }
@@ -128,6 +133,7 @@ def calculate_system_divergence(positions_set):
     pos_set_np = []
     for pos in positions_set:
         if pos is None: return None 
+        # Zajišťujeme, že data jsou zkrácena a převedena na NumPy
         pos_np = cp.asnumpy(pos[:n_timesteps]) if GPU_AVAILABLE and isinstance(pos, cp.ndarray) else pos[:n_timesteps]
         pos_set_np.append(pos_np)
 
@@ -137,21 +143,85 @@ def calculate_system_divergence(positions_set):
         for i in range(variation_count):
             for j in range(i + 1, variation_count):
                 diff = pos_set_np[i][t] - pos_set_np[j][t]
-                # Euklidovská vzdálenost
                 dist = np.sqrt(np.sum(diff**2))
                 total_dist += dist
                 pair_count += 1
         if pair_count > 0:
-             # Průměrná vzdálenost
              divergence[t] = total_dist / pair_count
 
     return divergence
 
+# ========================= UKLÁDÁNÍ/NAČÍTÁNÍ DAT ============================
+
+def save_simulation_data(all_pos, all_ene, time_points, masses, divergence):
+    """Uloží výsledky simulace do komprimovaného NumPy souboru (.npz)."""
+    try:
+        # Převedeme veškerá data na NumPy pole před uložením
+        # Zajišťujeme, že i CuPy pole jsou převedena na NumPy před ukládáním
+        pos_np = [cp.asnumpy(p) if GPU_AVAILABLE and isinstance(p, cp.ndarray) else p for p in all_pos]
+        
+        # Sestavíme data do slovníku pro uložení
+        save_dict = {
+            f'positions_var_{i}': pos_np[i] for i in range(len(pos_np))
+        }
+        # Energetické historie jsou již v NumPy z run_simulation
+        save_dict.update({
+            f'ke_var_{i}': all_ene[i][0] for i in range(len(all_ene))
+        })
+        save_dict.update({
+            f'pe_var_{i}': all_ene[i][1] for i in range(len(all_ene))
+        })
+        save_dict.update({
+            f'total_e_var_{i}': all_ene[i][2] for i in range(len(all_ene))
+        })
+        
+        save_dict['time_points'] = time_points
+        save_dict['masses'] = masses
+        save_dict['divergence'] = divergence
+
+        np.savez_compressed(DATA_FILENAME, **save_dict)
+        print(f"Data simulace úspěšně uložena do: {DATA_FILENAME}")
+    except Exception as e:
+        print(f"Chyba při ukládání dat: {e}")
+
+def load_simulation_data():
+    """Načte výsledky simulace z .npz souboru."""
+    if not os.path.exists(DATA_FILENAME):
+        return None
+
+    print(f"Načítám data simulace z: {DATA_FILENAME}")
+    try:
+        data = np.load(DATA_FILENAME, allow_pickle=True)
+        
+        # Zjištění počtu variací z uložených klíčů
+        n_vars = 0
+        while f'positions_var_{n_vars}' in data:
+            n_vars += 1
+            
+        if n_vars == 0:
+            print("Chyba: Soubor neobsahuje data variací.")
+            return None
+            
+        all_pos = [data[f'positions_var_{i}'] for i in range(n_vars)]
+        all_ene = [
+            (data[f'ke_var_{i}'], data[f'pe_var_{i}'], data[f'total_e_var_{i}']) 
+            for i in range(n_vars)
+        ]
+        time_points = data['time_points']
+        masses = data['masses']
+        divergence = data['divergence']
+        
+        print("Data simulace úspěšně načtena.")
+        return all_pos, all_ene, time_points, masses, divergence
+
+    except Exception as e:
+        print(f"Chyba při načítání dat: {e}")
+        return None
+
 # =================== FYZIKÁLNÍ VÝPOČTY (GPU/CPU) =====================
-# Funkce calculate_accelerations a runge_kutta_step (beze změny, použijí globální cp/np)
+# Funkce calculate_accelerations a runge_kutta_step (beze změny)
 def calculate_accelerations(positions_gpu, masses_gpu, G, softening):
     """Vypočítá zrychlení (optimalizováno pro GPU)."""
-    # ... (kód funkce calculate_accelerations zůstává stejný) ...
     n = positions_gpu.shape[0]
     diff = positions_gpu[:, cp.newaxis, :] - positions_gpu[cp.newaxis, :, :]
     dist_sqr = cp.sum(diff**2, axis=-1) + softening**2
@@ -167,7 +237,6 @@ def calculate_accelerations(positions_gpu, masses_gpu, G, softening):
 
 def runge_kutta_step(positions_gpu, velocities_gpu, masses_gpu, dt, G, softening):
     """Jeden krok RK4."""
-    # ... (kód funkce runge_kutta_step zůstává stejný) ...
     a1 = calculate_accelerations(positions_gpu, masses_gpu, G, softening)
     k1_v = a1 * dt; k1_r = velocities_gpu * dt
     a2 = calculate_accelerations(positions_gpu + k1_r * 0.5, masses_gpu, G, softening)
@@ -191,7 +260,6 @@ def runge_kutta_step(positions_gpu, velocities_gpu, masses_gpu, dt, G, softening
 # ====================== INICIALIZACE TĚLES =========================
 def initialize_bodies(variation_idx=0):
     """Inicializuje tělesa podle CONFIGURATION."""
-    # ... (kód funkce initialize_bodies zůstává stejný) ...
     if CONFIGURATION == 'chaos_3body':
         n_bodies = CHAOS_CONFIG['n_bodies']
         base_state = CHAOS_CONFIG['initial_state']['bodies']
@@ -262,11 +330,11 @@ def initialize_bodies(variation_idx=0):
 # ======================= HLAVNÍ SIMULACE =============================
 def run_simulation(variation_idx=0):
     """Spustí N-body simulaci a vrátí historii."""
-    # ... (kód funkce run_simulation zůstává stejný) ...
     print(f"--- Spouštím simulaci {'(variace '+str(variation_idx)+')' if CONFIGURATION=='chaos_3body' else ''} ---")
     positions_np, velocities_np, masses_np = initialize_bodies(variation_idx)
     n_bodies = positions_np.shape[0]
 
+    # Použití cp.asarray pro kompatibilitu s CuPy/NumPy
     positions_gpu = cp.asarray(positions_np)
     velocities_gpu = cp.asarray(velocities_np)
     masses_gpu = cp.asarray(masses_np)
@@ -290,7 +358,7 @@ def run_simulation(variation_idx=0):
              current_pos_np = cp.asnumpy(positions_gpu)
              current_vel_np = cp.asnumpy(velocities_gpu)
              if not np.all(np.isfinite(current_pos_np)) or not np.all(np.isfinite(current_vel_np)):
-                 print(f"CHYBA: Nestabilita v kroku {step}! Přerušuji."); return None # Ukončíme při chybě
+                 print(f"CHYBA: Nestabilita v kroku {step}! Přerušuji."); return None 
              if history_idx < n_frames_saved:
                  positions_history[history_idx] = current_pos_np
                  # KINETICKÁ A POTENCIÁLNÍ ENERGIE MUSÍ BÝT VYPOČÍTÁNA ZDE (na CPU datech)
@@ -324,7 +392,7 @@ def run_simulation(variation_idx=0):
 
 
 # ========================= VIZUALIZACE ===============================
-# ... (pomocná funkce _update_artists a visualize_2body_simulation beze změny) ...
+
 def _update_artists(trail, marker, positions_history, frame, body_idx, trail_length):
     start_idx = max(0, frame - trail_length + 1)
     current_pos = positions_history[frame, body_idx]
@@ -341,6 +409,7 @@ def _update_artists(trail, marker, positions_history, frame, body_idx, trail_len
         trail.set_data([], []); trail.set_3d_properties([])
     return True
 
+# ... (visualize_2body_simulation beze změny) ...
 def visualize_2body_simulation(positions_history, ke, pe, total_e, time_points, masses):
     """Vizualizuje simulaci 2 těles."""
     global last_azim, last_elev
@@ -385,8 +454,8 @@ def visualize_2body_simulation(positions_history, ke, pe, total_e, time_points, 
     plt.tight_layout(pad=1.5); plt.show()
 
 
-# Nová a upravená vizualizace chaosu
-def visualize_multiple_variations(all_positions, all_energies, time_points, masses, divergence):
+# Vizualizace pro více variací (chaos) - UPRAVENO pro ukládání MP4
+def visualize_multiple_variations(all_positions, all_energies, time_points, masses, divergence, save_video=False):
     """
     Vizualizuje 3D trajektorie, logaritmus divergence a zachování energie.
     """
@@ -433,14 +502,12 @@ def visualize_multiple_variations(all_positions, all_energies, time_points, mass
     # --- Graf Divergence (ax2) ---
     if divergence is not None and len(divergence) > 0:
         # Použijeme log10 pro exponenciální růst
-        # Nahradíme nulovou divergenci malou hodnotou pro logaritmickou škálu (pro t=0)
         log_divergence = np.log10(np.maximum(divergence[:n_frames], 1e-15))
         ax2.plot(tp, log_divergence, 'k-')
         ax2.set_title('Exponenciální Divergence Trajektorií')
         ax2.set_xlabel('Čas (T)')
         ax2.set_ylabel('Log10(Prům. Vzdálenost)')
         ax2.grid(True)
-        # Zvýraznění lineárního růstu (fáze chaosu)
         ax2.axhline(y=np.log10(max_r*0.5), color='r', linestyle='--', label='Saturace (velikost systému)')
         ax2.legend()
     else:
@@ -451,7 +518,6 @@ def visualize_multiple_variations(all_positions, all_energies, time_points, mass
     # Zobrazíme změnu E pro první variaci
     ke0, pe0, total_e_var0 = all_energies[0]
     e0 = total_e_var0[0]
-    # Relativní změna energie
     e_change = (total_e_var0[:n_frames] - e0) / (np.abs(e0) + 1e-10)
 
     ax3.plot(tp, e_change, color='purple', linewidth=LINEWIDTH)
@@ -459,7 +525,6 @@ def visualize_multiple_variations(all_positions, all_energies, time_points, mass
     ax3.set_xlabel('Čas (T)')
     ax3.set_ylabel(r'$\Delta E / |E_0|$')
     ax3.grid(True)
-    # Nastavíme symetrické limity
     max_ch = np.max(np.abs(e_change))
     ax3.set_ylim(-max_ch*1.1, max_ch*1.1)
 
@@ -478,6 +543,18 @@ def visualize_multiple_variations(all_positions, all_energies, time_points, mass
         return artists
 
     ani = FuncAnimation(fig, update, frames=n_frames, interval=1000/VIZ_FPS, blit=False, repeat=True)
+    
+    if save_video:
+        VIDEO_FILENAME = 'chaos_3body_simulation.mp4'
+        print(f"Ukládám animaci do {VIDEO_FILENAME}. To může trvat několik minut...")
+        try:
+            # Uložení videa (vyžaduje FFMPEG)
+            ani.save(VIDEO_FILENAME, fps=VIZ_FPS, extra_args=['-vcodec', 'libx264'])
+            print("Ukládání videa dokončeno.")
+        except Exception as e:
+            print("CHYBA PŘI UKLÁDÁNÍ VIDEA: Ujistěte se, že máte nainstalovaný FFMPEG.")
+            print(f"Podrobná chyba: {e}")
+            
     plt.tight_layout(pad=0.5)
     plt.show()
 
@@ -494,14 +571,12 @@ def run_multiple_variations():
         result = run_simulation(variation_idx=i)
         if result is None: success = False; break
         pos, ke, pe, tot, tp, m = result
-        # all_energies je uložen jako (ke_history, pe_history, total_energy_history)
         all_pos[i] = pos; all_ene[i] = (ke, pe, tot) 
         if i == 0: masses, time_points = m, tp
 
     if not success: print("Některá variace selhala."); return None
 
     print("Výpočet divergence...")
-    # Funkce calculate_system_divergence je upravena pro průměrnou vzdálenost (ne sqr)
     divergence = calculate_system_divergence(all_pos) 
     if divergence is None: print("Nepodařilo se spočítat divergenci."); return None
 
@@ -509,18 +584,44 @@ def run_multiple_variations():
 
 
 def main():
-    """Hlavní funkce."""
+    """Hlavní funkce s logikou pro uložení/načtení."""
     print(f"====== SIMULACE N-TĚLES ({'GPU' if GPU_AVAILABLE else 'CPU'}) ======")
     print(f" Konfigurace: {CONFIGURATION}")
 
     if CONFIGURATION == 'chaos_3body':
-        results = run_multiple_variations()
+        
+        # 1. Zkusíme nejprve načíst existující data
+        results = load_simulation_data() 
+
         if results:
+            print("Přecházím rovnou k vizualizaci (načtená data).")
             all_pos, all_ene, time_points, masses, divergence = results
+            
+            save_video_q = input("Chcete uložit animaci do MP4 souboru a zavřít program? (a/n): ").lower()
+            save_video = save_video_q == 'a'
+            
             print("Spouštím vizualizaci chaosu...")
-            visualize_multiple_variations(all_pos, all_ene, time_points, masses, divergence)
+            visualize_multiple_variations(all_pos, all_ene, time_points, masses, divergence, save_video=save_video)
+            
         else:
-            print("Vizualizace chaosu přeskočena kvůli chybě.")
+            print("Data nenalezena. Spouštím novou simulaci...")
+            # 2. Spustit novou simulaci, pokud data neexistují
+            results = run_multiple_variations()
+            
+            if results:
+                all_pos, all_ene, time_points, masses, divergence = results
+                # 3. Uložíme výsledky nové simulace
+                save_simulation_data(all_pos, all_ene, time_points, masses, divergence)
+                
+                save_video_q = input("Nová data byla uložena. Chcete uložit animaci do MP4 souboru a zavřít program? (a/n): ").lower()
+                save_video = save_video_q == 'a'
+
+                print("Spouštím vizualizaci chaosu...")
+                visualize_multiple_variations(all_pos, all_ene, time_points, masses, divergence, save_video=save_video)
+            else:
+                print("Vizualizace chaosu přeskočena kvůli chybě.")
+    
+    # ... (logika pro 2 tělesa zůstává beze změny) ...
     elif CONFIGURATION in ['circle_pair', 'ellipse_pair']:
         result = run_simulation()
         if result:
@@ -531,6 +632,7 @@ def main():
             print("Vizualizace 2 těles přeskočena kvůli chybě.")
     else:
         print(f"Neznámá nebo nepodporovaná konfigurace: {CONFIGURATION}")
+
 
 if __name__ == "__main__":
     main()
