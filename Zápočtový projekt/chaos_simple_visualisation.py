@@ -4,7 +4,7 @@ try:
     GPU_AVAILABLE = True
     print("CuPy nalezeno, výpočty poběží na GPU.")
 except ImportError:
-    cp = np # Fallback na NumPy
+    cp = np 
     GPU_AVAILABLE = False
     print("CuPy nenalezeno, výpočty poběží na CPU.")
 
@@ -16,7 +16,7 @@ import time
 
 # ======================= KONFIGURACE SIMULACE ======================
 
-CONFIGURATION = 'ellipse_pair' # 'circle_pair', 'ellipse_pair', 'chaos_3body'
+CONFIGURATION = 'chaos_3body' # 'circle_pair', 'ellipse_pair', 'chaos_3body'
 
 # --- Parametry pro 2 Tělesa ---
 BODY_PARAMS_2BODY = {
@@ -67,7 +67,7 @@ CHAOS_CONFIG = {
 
 # --- Simulační Parametry ---
 SIM_PARAMS = {
-    'dt': 0.01,                 # Časový krok (menší pro chaos!) pro chaos dát 0.01 nebo méně
+    'dt': 0.05,                 # Časový krok (menší pro chaos!) pro chaos dát 0.01 nebo méně
     'total_time': 150,          # Celkový čas simulace Pro chaos dát 150 nebo více
     'G': 1.0,                   # Gravitační konstanta
     'softening': 0.05,          # Změkčení (menší pro chaos!)
