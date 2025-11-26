@@ -35,7 +35,7 @@ BODY_PARAMS_2BODY = {
 # --- Parametry pro Demonstraci Chaosu (3 Tělesa) ---
 CHAOS_CONFIG = {
     'n_bodies': 3,
-    'n_variations': 3, # Počet simulací s mírně odlišnými podmínkami
+    'n_variations': 2, # Počet simulací s mírně odlišnými podmínkami
     'initial_state': { #Počáteční stav těles
     'bodies': [
         [1.0, [2.0, 1.5, 0], [-0.25, 0.3, 0.1]],
@@ -43,6 +43,7 @@ CHAOS_CONFIG = {
         [1.0, [-2.0, 1.0, 0], [0.3, -0.2, -0.2]],
         
         [1.0, [0.0, -2.5, 0], [-0.05, -0.1, 0.1]]
+
     ]
 },
     # Perturbace (malé změny pro další variace)
@@ -61,7 +62,7 @@ CHAOS_CONFIG = {
 # --- Simulační Parametry ---
 SIM_PARAMS = {
     'dt': 0.01,                 # Zmenšeno pro stabilitu chaosu
-    'total_time': 100,          # Zvětšeno pro zobrazení divergence
+    'total_time': 10,          # Zvětšeno pro zobrazení divergence
     'G': 1.0,                   # Gravitační konstanta
     'softening': 0.01,          # Změkčení (menší pro chaos!)
 }
